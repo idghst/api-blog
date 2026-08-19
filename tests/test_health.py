@@ -211,7 +211,16 @@ def test_cors_allows_only_configured_origin(settings: Settings) -> None:
         },
     )
 
+    blog = client.options(
+        "/health/live",
+        headers={
+            "Origin": "https://blog.idghst.co.kr",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
     assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert blog.headers["access-control-allow-origin"] == "https://blog.idghst.co.kr"
     assert denied.status_code == 400
 
 

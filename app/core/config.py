@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     app_name: ClassVar[str] = "Blog API"
     supabase_schema: ClassVar[str] = "blog"
     CORS_ORIGINS: ClassVar[list[str]] = [
-        require_http_origin("http://localhost:3000", allow_root_path=False)
+        require_http_origin("http://localhost:3000", allow_root_path=False),
+        require_http_origin("https://blog.idghst.co.kr", allow_root_path=False),
     ]
     SUPABASE_TIMEOUT_SECONDS: ClassVar[float] = 5.0
 

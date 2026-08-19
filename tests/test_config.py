@@ -89,7 +89,10 @@ def test_cors_origins_are_fixed() -> None:
         SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
     )
 
-    assert settings.CORS_ORIGINS == ["http://localhost:3000"]
+    assert settings.CORS_ORIGINS == [
+        "http://localhost:3000",
+        "https://blog.idghst.co.kr",
+    ]
     assert "*" not in settings.CORS_ORIGINS
 
 
