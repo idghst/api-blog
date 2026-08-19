@@ -119,7 +119,7 @@ def test_factory_injects_supplied_settings_and_root_message(
     assert response.json() == {"message": "Blog API"}
 
 
-def test_production_host_disables_docs_and_openapi() -> None:
+def test_production_host_exposes_docs_and_openapi() -> None:
     app = create_app(
         Settings(
             SUPABASE_URL="https://example.supabase.co",
@@ -131,14 +131,7 @@ def test_production_host_disables_docs_and_openapi() -> None:
     client = TestClient(app, base_url="http://api.example.com")
 
     for path in ("/docs", "/redoc", "/openapi.json"):
-        response = client.get(path, headers={"X-Request-ID": "req-docs"})
-
-        assert response.status_code == 404
-        assert response.json() == {
-            "code": "http_error",
-            "message": "HTTP error",
-            "request_id": "req-docs",
-        }
+        assert client.get(path).status_code == 200
 
 
 def test_localhost_and_test_hosts_expose_docs(settings: Settings) -> None:

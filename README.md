@@ -22,7 +22,7 @@ uv run uvicorn app.main:app --reload
 ```
 
 - API: <http://127.0.0.1:8000>
-- Docs (localhost / Host에 `dev` 또는 `test`): <http://127.0.0.1:8000/docs>
+- Docs: <http://127.0.0.1:8000/docs>
 - Liveness: <http://127.0.0.1:8000/health> 또는 <http://127.0.0.1:8000/health/live>
 - Readiness: <http://127.0.0.1:8000/health/ready>
 
@@ -126,9 +126,9 @@ Vercel Dashboard에서 **같은 `fastapi-blog` 프로젝트의** Preview와 Prod
 환경을 분리해 아래 변수를 모두 설정합니다.
 
 환경은 요청 Host/URL hostname으로만 가릅니다. `test`면 test, `dev` 또는
-localhost/127.0.0.1이면 development, 그 외는 production입니다. production host에서는
-`/docs` `/redoc` `/openapi.json`을 비공개하고, secret key와 HTTPS `SUPABASE_URL`이
-필요합니다. 로그 레벨은 INFO로 고정입니다.
+localhost/127.0.0.1이면 development, 그 외는 production입니다. `/docs` `/redoc`
+`/openapi.json`은 모든 환경에서 공개합니다. production host에서는 secret key와
+HTTPS `SUPABASE_URL`이 필요합니다. 로그 레벨은 INFO로 고정입니다.
 
 | Variable | Preview | Production | Notes |
 | --- | --- | --- | --- |

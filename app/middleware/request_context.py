@@ -16,10 +16,6 @@ REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 logger = logging.getLogger(__name__)
 
 
-def _is_docs_path(path: str) -> bool:
-    return path == "/openapi.json" or path.startswith(("/docs", "/redoc"))
-
-
 def _is_liveness_path(path: str) -> bool:
     return path in {"/health", "/health/live"}
 
@@ -49,9 +45,6 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 resolve_app_env(request.headers.get("host", ""), str(request.url))
                 == "production"
             ):
-                if _is_docs_path(request.url.path):
-                    status = 404
-                    return _error_response(request, 404, "http_error", "HTTP error")
                 settings = getattr(request.app.state, "settings", None)
                 if isinstance(settings, Settings) and not _is_liveness_path(
                     request.url.path
