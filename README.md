@@ -81,6 +81,13 @@ X-Blog-Key: <BLOG_API_KEY>
 | `POST` | `/api/posts` | `X-Blog-Key` | 생성된 레코드 (`201`) |
 | `PATCH` | `/api/posts/{slug}` | `X-Blog-Key` | 변경된 레코드 |
 | `DELETE` | `/api/posts/{slug}` | `X-Blog-Key` | `204 No Content` |
+| `GET` | `/api/posts/{slug}/comments` | 공개 | `{ "items": [...], "count": n }` |
+| `POST` | `/api/posts/{slug}/comments` | 공개 | 생성된 댓글 (`201`) |
+| `POST` | `/api/blobs` | `X-Blog-Key` | `{ id, description, mimeType, createdAt }` |
+| `GET` | `/api/blobs/{id}` | 공개 | 이미지 바이트 |
+| `GET` | `/api/blobs/{id}/meta` | 공개 | `{ id, description, mimeType, createdAt }` |
+
+댓글은 `author`, `body`. 본문 그림은 `![설명](blob:<uuid>)`.
 
 쿼리: `type` (`guide`\|`news`\|`stock`), `tag`, `locale` (`ko`\|`en`), `limit`,
 `offset`, `includeDrafts`.

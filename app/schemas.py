@@ -88,3 +88,62 @@ class PostPatch(BaseModel):
         if not self.model_fields_set:
             raise ValueError("At least one field is required")
         return self
+
+
+CommentAuthor = Annotated[str, Field(min_length=1, max_length=80)]
+CommentBody = Annotated[str, Field(min_length=1, max_length=2_000)]
+BlobMime = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+
+
+class CommentOut(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    id: int
+    author: str
+    body: str
+    created_at: datetime
+
+
+class CommentList(BaseModel):
+    items: list[CommentOut]
+    count: int = Field(ge=0)
+
+
+class CommentCreate(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    author: CommentAuthor
+    body: CommentBody
+
+
+class BlobMeta(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    id: str
+    description: str
+    mime_type: BlobMime
+    created_at: datetime
+
+
+class BlobCreate(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        extra="forbid",
+        populate_by_name=True,
+        str_strip_whitespace=True,
+    )
+
+    description: Annotated[str, Field(min_length=1, max_length=500)]
+    mime_type: BlobMime
+    content_base64: Annotated[str, Field(min_length=1)]
