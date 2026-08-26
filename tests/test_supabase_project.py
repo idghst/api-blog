@@ -106,6 +106,20 @@ def test_post_views_migration_dedupes_and_keeps_records_private() -> None:
     assert "do update set total = post_view_counts.total + 1" in migration
 
 
+def test_post_view_count_follows_deleted_rows() -> None:
+    migrations = sorted(
+        (PROJECT_ROOT / "supabase" / "migrations").glob(
+            "*_sync_post_view_count_on_delete.sql"
+        )
+    )
+
+    assert len(migrations) == 1
+    migration = migrations[0].read_text(encoding="utf-8")
+
+    assert "after delete on blog.post_views" in migration
+    assert "set total = greatest(total - 1, 0)" in migration
+
+
 def test_post_out_ignores_unknown_store_columns() -> None:
     record = PostOut.model_validate(
         {

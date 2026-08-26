@@ -110,6 +110,15 @@ Content-Type: application/json
 바뀌면 다시 1건 집계됩니다. 합계는 insert trigger가 같은 트랜잭션에서 올리므로 동시
 요청이 서로의 증가분을 덮어쓰지 않습니다.
 
+`blog.post_view_counts.total`은 `blog.post_views` 행 수의 파생 값입니다. 두 트리거가
+양방향을 맞추므로 SQL로 `post_views`를 직접 지워도 합계가 따라 내려갑니다. 합계를
+손으로 고치지 마세요. 어긋났다고 판단되면 행 수로 다시 계산합니다.
+
+```sql
+update blog.post_view_counts c
+   set total = (select count(*) from blog.post_views v where v.post_id = c.post_id);
+```
+
 `visitor`는 원문을 저장하지 않습니다. `visitorId`가 오면 그 값을, 없으면 클라이언트
 IP와 User-Agent 조합을 서버 시크릿 키로 HMAC-SHA256 해싱해 넣습니다. IPv4는 주소
 공간이 좁아 salt 없는 해시가 전수 대입으로 역산되기 때문입니다. 키는
