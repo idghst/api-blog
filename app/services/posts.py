@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Response
@@ -12,6 +13,27 @@ from supabase import AsyncClient
 
 TABLE_NAME = "posts"
 _NOT_FOUND = ("post_not_found", "Post was not found")
+_PUBLISHED_AT = "published_at"
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _needs_publish_stamp(row: dict[str, Any]) -> bool:
+    """A published post must carry the time it went live."""
+    return row.get("draft") is False and row.get(_PUBLISHED_AT) is None
+
+
+async def _stamp_published_at(client: AsyncClient, slug: str) -> dict[str, Any] | None:
+    """Fill an empty published_at. Returns None when another writer won the race."""
+    rows, _ = await execute_query(
+        client.table(TABLE_NAME)
+        .update({_PUBLISHED_AT: _now_iso()})
+        .eq("slug", slug)
+        .is_(_PUBLISHED_AT, None)
+    )
+    return rows[0] if rows else None
 
 
 def _output(row: dict[str, Any]) -> PostOut:
@@ -41,7 +63,9 @@ async def list_posts(
     if locale is not None:
         query = query.eq("locale", locale)
     rows, count = await execute_query(
-        query.order("published_at", desc=True).range(offset, offset + limit - 1)
+        query.order(_PUBLISHED_AT, desc=True, nullsfirst=False).range(
+            offset, offset + limit - 1
+        )
     )
     if count is None:
         raise invalid_response()
@@ -59,11 +83,10 @@ async def get_post(
 
 
 async def create_post(client: AsyncClient, post_input: PostCreate) -> PostOut:
-    rows, _ = await execute_query(
-        client.table(TABLE_NAME).insert(
-            post_input.model_dump(mode="json", exclude_none=True)
-        )
-    )
+    values = post_input.model_dump(mode="json", exclude_none=True)
+    if not post_input.draft and post_input.published_at is None:
+        values[_PUBLISHED_AT] = _now_iso()
+    rows, _ = await execute_query(client.table(TABLE_NAME).insert(values))
     if not rows:
         raise invalid_response()
     return _output(rows[0])
@@ -76,7 +99,10 @@ async def update_post(client: AsyncClient, slug: str, post_input: PostPatch) -> 
     rows, _ = await execute_query(
         client.table(TABLE_NAME).update(changes).eq("slug", slug)
     )
-    return _output(ensure_row(rows, code=_NOT_FOUND[0], message=_NOT_FOUND[1]))
+    row = ensure_row(rows, code=_NOT_FOUND[0], message=_NOT_FOUND[1])
+    if _needs_publish_stamp(row):
+        row = await _stamp_published_at(client, row["slug"]) or row
+    return _output(row)
 
 
 async def delete_post(client: AsyncClient, slug: str) -> Response:

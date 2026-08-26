@@ -95,6 +95,13 @@ X-Blog-Key: <BLOG_API_KEY>
 레코드는 `slug`, `title`, `description`, `type`, `tags`, `body`, `ticker`, `cover`,
 `locale`, `draft`, `publishedAt`, `updatedAt`, `createdAt`을 사용합니다.
 
+`publishedAt`은 발행 시각입니다. `draft=false`로 생성하면서 값을 주지 않으면 API가
+그 시점의 UTC 시각을 채웁니다. `draft=true`로 생성하면 비워 두고, 나중에
+`draft=false`로 바꾸는 요청에서 비어 있을 때만 채웁니다. 이미 값이 있으면 첫 발행
+시각을 보존합니다. 저장과 응답은 항상 UTC instant(`2026-08-05T02:15:00Z`)이며 한국
+시간 등 지역 시각 표기는 클라이언트가 변환합니다. 목록은 `publishedAt` 내림차순에
+NULL을 뒤로 보냅니다.
+
 ```bash
 curl -i http://127.0.0.1:8000/api/posts
 curl -i -H "X-Blog-Key: $BLOG_API_KEY" http://127.0.0.1:8000/api/posts?includeDrafts=true

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -40,8 +41,9 @@ class FakeQuery:
         self.filters: list[tuple[str, object]] = []
         self.inserted: dict[str, Any] | None = None
         self.updated: dict[str, Any] | None = None
+        self.updates: list[dict[str, Any]] = []
         self.deleted = False
-        self.ordered: tuple[str, bool] | None = None
+        self.ordered: tuple[str, bool, bool | None] | None = None
         self.ranged: tuple[int, int] | None = None
         self.limited: int | None = None
 
@@ -57,8 +59,14 @@ class FakeQuery:
         self.filters.append((f"contains:{column}", value))
         return self
 
-    def order(self, column: str, *, desc: bool = False) -> "FakeQuery":
-        self.ordered = (column, desc)
+    def is_(self, column: str, value: object) -> "FakeQuery":
+        self.filters.append((f"is:{column}", value))
+        return self
+
+    def order(
+        self, column: str, *, desc: bool = False, nullsfirst: bool | None = None
+    ) -> "FakeQuery":
+        self.ordered = (column, desc, nullsfirst)
         return self
 
     def range(self, start: int, end: int) -> "FakeQuery":
@@ -75,6 +83,7 @@ class FakeQuery:
 
     def update(self, payload: dict[str, Any]) -> "FakeQuery":
         self.updated = payload
+        self.updates.append(payload)
         return self
 
     def delete(self) -> "FakeQuery":
@@ -83,6 +92,15 @@ class FakeQuery:
 
     async def execute(self) -> FakeResponse:
         return self.response
+
+
+class SequencedQuery(FakeQuery):
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        super().__init__(responses[0])
+        self.responses = list(responses)
+
+    async def execute(self) -> FakeResponse:  # type: ignore[override]
+        return self.responses.pop(0)
 
 
 class FakeClient:
@@ -143,7 +161,7 @@ def test_public_list_hides_drafts_and_returns_camel_case() -> None:
     assert ("type", "guide") in query.filters
     assert ("contains:tags", ["python"]) in query.filters
     assert ("locale", "ko") in query.filters
-    assert query.ordered == ("published_at", True)
+    assert query.ordered == ("published_at", True, False)
     assert query.ranged == (0, 9)
 
 
@@ -236,6 +254,71 @@ def test_create_post_requires_key_and_inserts_snake_case() -> None:
     assert response.json()["createdAt"] == "2026-08-01T00:00:00Z"
 
 
+def test_create_published_post_stamps_publish_time() -> None:
+    app, _ = make_app()
+    query = FakeQuery(FakeResponse([sample_row()]))
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).post(
+        "/api/posts",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={"slug": "hello-world", "title": "Hello", "type": "guide", "body": "hi"},
+    )
+
+    assert response.status_code == 201
+    assert query.inserted is not None
+    stamped = datetime.fromisoformat(query.inserted["published_at"])
+    assert stamped.tzinfo is not None
+    assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
+
+
+def test_create_draft_post_leaves_publish_time_empty() -> None:
+    app, _ = make_app()
+    query = FakeQuery(FakeResponse([sample_row(draft=True, published_at=None)]))
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).post(
+        "/api/posts",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={
+            "slug": "hello-world",
+            "title": "Hello",
+            "type": "guide",
+            "body": "hi",
+            "draft": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert query.inserted is not None
+    assert "published_at" not in query.inserted
+    assert response.json()["publishedAt"] is None
+
+
+def test_create_post_keeps_explicit_publish_time() -> None:
+    app, _ = make_app()
+    query = FakeQuery(FakeResponse([sample_row()]))
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).post(
+        "/api/posts",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={
+            "slug": "hello-world",
+            "title": "Hello",
+            "type": "guide",
+            "body": "hi",
+            "publishedAt": "2026-08-01T09:30:00Z",
+        },
+    )
+
+    assert response.status_code == 201
+    assert query.inserted is not None
+    assert datetime.fromisoformat(query.inserted["published_at"]) == datetime(
+        2026, 8, 1, 9, 30, tzinfo=UTC
+    )
+
+
 def test_patch_post_updates_by_slug() -> None:
     app, _ = make_app()
     query = FakeQuery(FakeResponse([sample_row(title="Updated")]))
@@ -251,6 +334,84 @@ def test_patch_post_updates_by_slug() -> None:
     assert query.updated == {"title": "Updated"}
     assert ("slug", "hello-world") in query.filters
     assert response.json()["title"] == "Updated"
+
+
+def test_patch_publishing_stamps_missing_publish_time() -> None:
+    app, _ = make_app()
+    published = sample_row(draft=False, published_at="2026-08-05T02:15:00+00:00")
+    query = SequencedQuery(
+        [
+            FakeResponse([sample_row(draft=False, published_at=None)]),
+            FakeResponse([published]),
+        ]
+    )
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).patch(
+        "/api/posts/hello-world",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={"draft": False},
+    )
+
+    assert response.status_code == 200
+    assert len(query.updates) == 2
+    assert query.updates[0] == {"draft": False}
+    stamped = datetime.fromisoformat(query.updates[1]["published_at"])
+    assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
+    assert ("is:published_at", None) in query.filters
+    assert response.json()["publishedAt"] == "2026-08-05T02:15:00Z"
+
+
+def test_patch_publishing_keeps_existing_publish_time() -> None:
+    app, _ = make_app()
+    query = FakeQuery(FakeResponse([sample_row(draft=False)]))
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).patch(
+        "/api/posts/hello-world",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={"draft": False},
+    )
+
+    assert response.status_code == 200
+    assert query.updates == [{"draft": False}]
+    assert response.json()["publishedAt"] == "2026-08-01T00:00:00Z"
+
+
+def test_patch_to_draft_does_not_stamp_publish_time() -> None:
+    app, _ = make_app()
+    query = FakeQuery(FakeResponse([sample_row(draft=True, published_at=None)]))
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).patch(
+        "/api/posts/hello-world",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={"draft": True},
+    )
+
+    assert response.status_code == 200
+    assert query.updates == [{"draft": True}]
+    assert response.json()["publishedAt"] is None
+
+
+def test_patch_publish_stamp_lost_race_still_returns_post() -> None:
+    app, _ = make_app()
+    query = SequencedQuery(
+        [
+            FakeResponse([sample_row(draft=False, published_at=None)]),
+            FakeResponse([]),
+        ]
+    )
+    override_client(app, FakeClient(query))
+
+    response = TestClient(app).patch(
+        "/api/posts/hello-world",
+        headers={"X-Blog-Key": "blog-test-key"},
+        json={"draft": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["publishedAt"] is None
 
 
 def test_empty_patch_is_rejected() -> None:

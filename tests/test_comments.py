@@ -67,7 +67,7 @@ def test_list_comments_is_public_and_returns_camel_case() -> None:
     assert "id" in body["items"][0]
     assert ("slug", "hello-world") in posts.filters
     assert ("post_id", 1) in comments.filters
-    assert comments.ordered == ("created_at", False)
+    assert comments.ordered == ("created_at", False, None)
 
 
 def test_list_comments_for_missing_post_returns_404() -> None:
