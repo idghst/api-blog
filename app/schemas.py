@@ -33,6 +33,7 @@ class PostOut(BaseModel):
     published_at: datetime | None = None
     updated_at: datetime
     created_at: datetime
+    view_count: int = Field(default=0, ge=0)
 
 
 class PostList(BaseModel):
@@ -88,6 +89,28 @@ class PostPatch(BaseModel):
         if not self.model_fields_set:
             raise ValueError("At least one field is required")
         return self
+
+
+class PostViewCreate(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        extra="forbid",
+        populate_by_name=True,
+        str_strip_whitespace=True,
+    )
+
+    visitor_id: Annotated[str | None, Field(min_length=1, max_length=200)] = None
+
+
+class PostViewOut(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=_camel_case,
+        populate_by_name=True,
+    )
+
+    slug: str
+    view_count: int = Field(ge=0)
+    counted: bool
 
 
 CommentAuthor = Annotated[str, Field(min_length=1, max_length=80)]

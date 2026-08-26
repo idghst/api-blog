@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     SUPABASE_PUBLISHABLE_KEY: SecretStr
     SUPABASE_SECRET_KEY: SecretStr | None = None
     BLOG_API_KEY: SecretStr | None = None
+    VIEW_HASH_SALT: SecretStr | None = None
 
     app_name: ClassVar[str] = "Blog API"
     supabase_schema: ClassVar[str] = "blog"
@@ -69,13 +70,19 @@ class Settings(BaseSettings):
             raise ValueError("SUPABASE_SECRET_KEY must not be a publishable key")
         return value
 
-    @field_validator("BLOG_API_KEY", mode="before")
+    @field_validator("BLOG_API_KEY", "VIEW_HASH_SALT", mode="before")
     @classmethod
-    def normalize_blank_blog_api_key(cls, value: object) -> object:
+    def normalize_blank_optional_secret(cls, value: object) -> object:
         raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
         if isinstance(raw_value, str) and not raw_value.strip():
             return None
         return value
+
+    def view_hash_secret(self) -> str | None:
+        """조회수 방문자 해싱 키. 전용 salt가 없으면 서버 secret key로 대체한다."""
+
+        salt = self.VIEW_HASH_SALT or self.SUPABASE_SECRET_KEY
+        return None if salt is None else salt.get_secret_value()
 
     @model_validator(mode="after")
     def reject_matching_publishable_and_secret_keys(self) -> "Settings":

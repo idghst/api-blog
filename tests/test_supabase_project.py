@@ -21,6 +21,8 @@ POST_COLUMNS = {
     "created_at",
 }
 POST_WRITABLE_COLUMNS = POST_COLUMNS - {"updated_at", "created_at"}
+# 조회수는 posts 컬럼이 아니라 blog.post_view_counts에서 합쳐 넣는 파생 값이다.
+POST_DERIVED_FIELDS = {"view_count"}
 
 
 def test_local_supabase_project_exposes_only_blog_schema_contract() -> None:
@@ -74,9 +76,34 @@ def test_posts_migration_keeps_records_private_to_the_server() -> None:
 
 
 def test_post_schemas_match_api_contract() -> None:
-    assert set(PostOut.model_fields) == POST_COLUMNS
+    assert set(PostOut.model_fields) == POST_COLUMNS | POST_DERIVED_FIELDS
     assert set(PostCreate.model_fields) == POST_WRITABLE_COLUMNS
     assert set(PostPatch.model_fields) == POST_WRITABLE_COLUMNS
+
+
+def test_post_views_migration_dedupes_and_keeps_records_private() -> None:
+    migrations = sorted(
+        (PROJECT_ROOT / "supabase" / "migrations").glob("*_create_post_views.sql")
+    )
+
+    assert len(migrations) == 1
+    migration = migrations[0].read_text(encoding="utf-8")
+
+    assert "create table if not exists blog.post_views" in migration
+    assert "primary key (post_id, visitor, viewed_on)" in migration
+    assert "create table if not exists blog.post_view_counts" in migration
+    assert "alter table blog.post_views enable row level security;" in migration
+    assert "alter table blog.post_view_counts enable row level security;" in migration
+    assert (
+        "revoke all privileges on table blog.post_views from anon, authenticated;"
+        in migration
+    )
+    assert (
+        "revoke all privileges on table blog.post_view_counts"
+        " from anon, authenticated;" in migration
+    )
+    assert "after insert on blog.post_views" in migration
+    assert "do update set total = post_view_counts.total + 1" in migration
 
 
 def test_post_out_ignores_unknown_store_columns() -> None:

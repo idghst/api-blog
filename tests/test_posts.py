@@ -42,6 +42,8 @@ class FakeQuery:
         self.inserted: dict[str, Any] | None = None
         self.updated: dict[str, Any] | None = None
         self.updates: list[dict[str, Any]] = []
+        self.upserted: dict[str, Any] | None = None
+        self.upsert_options: dict[str, Any] | None = None
         self.deleted = False
         self.ordered: tuple[str, bool, bool | None] | None = None
         self.ranged: tuple[int, int] | None = None
@@ -57,6 +59,10 @@ class FakeQuery:
 
     def contains(self, column: str, value: object) -> "FakeQuery":
         self.filters.append((f"contains:{column}", value))
+        return self
+
+    def in_(self, column: str, values: object) -> "FakeQuery":
+        self.filters.append((f"in:{column}", list(values)))  # type: ignore[call-overload]
         return self
 
     def is_(self, column: str, value: object) -> "FakeQuery":
@@ -79,6 +85,20 @@ class FakeQuery:
 
     def insert(self, payload: dict[str, Any]) -> "FakeQuery":
         self.inserted = payload
+        return self
+
+    def upsert(
+        self,
+        payload: dict[str, Any],
+        *,
+        ignore_duplicates: bool = False,
+        on_conflict: str = "",
+    ) -> "FakeQuery":
+        self.upserted = payload
+        self.upsert_options = {
+            "ignore_duplicates": ignore_duplicates,
+            "on_conflict": on_conflict,
+        }
         return self
 
     def update(self, payload: dict[str, Any]) -> "FakeQuery":
@@ -104,10 +124,15 @@ class SequencedQuery(FakeQuery):
 
 
 class FakeClient:
-    def __init__(self, query: FakeQuery) -> None:
+    def __init__(self, query: FakeQuery, view_counts: FakeQuery | None = None) -> None:
         self.query = query
+        self.view_counts = view_counts or FakeQuery(FakeResponse([]))
+        self.requested: list[str] = []
 
     def table(self, name: str) -> FakeQuery:
+        self.requested.append(name)
+        if name == "post_view_counts":
+            return self.view_counts
         assert name == "posts"
         return self.query
 
@@ -119,7 +144,6 @@ class FailingQuery(FakeQuery):
 
 class FailingClient:
     def table(self, name: str) -> FailingQuery:
-        assert name == "posts"
         return FailingQuery(FakeResponse([]))
 
 

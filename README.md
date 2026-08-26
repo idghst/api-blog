@@ -40,7 +40,7 @@ vercel dev
 
 1. Supabase Dashboard의 **API Settings → Exposed schemas**에 `blog`를 추가합니다.
 2. 필요한 Preview/Production 프로젝트 각각에 migration을 적용합니다.
-3. `blog.posts` migration을 적용합니다. 이 테이블은 RLS를 켜고 `anon`·`authenticated`
+3. `blog.posts`와 `blog.post_views`/`blog.post_view_counts` migration을 적용합니다. 이 테이블은 RLS를 켜고 `anon`·`authenticated`
    권한과 정책을 부여하지 않습니다. API의 서버 secret client만 접근하며,
    `service_role`/secret key는 이 경로에서만 사용합니다.
 
@@ -81,6 +81,7 @@ X-Blog-Key: <BLOG_API_KEY>
 | `POST` | `/api/posts` | `X-Blog-Key` | 생성된 레코드 (`201`) |
 | `PATCH` | `/api/posts/{slug}` | `X-Blog-Key` | 변경된 레코드 |
 | `DELETE` | `/api/posts/{slug}` | `X-Blog-Key` | `204 No Content` |
+| `POST` | `/api/posts/{slug}/view` | 공개 | `{ slug, viewCount, counted }` |
 | `GET` | `/api/posts/{slug}/comments` | 공개 | `{ "items": [...], "count": n }` |
 | `POST` | `/api/posts/{slug}/comments` | 공개 | 생성된 댓글 (`201`) |
 | `POST` | `/api/blobs` | `X-Blog-Key` | `{ id, description, mimeType, createdAt }` |
@@ -88,6 +89,40 @@ X-Blog-Key: <BLOG_API_KEY>
 | `GET` | `/api/blobs/{id}/meta` | 공개 | `{ id, description, mimeType, createdAt }` |
 
 댓글은 `author`, `body`. 본문 그림은 `![설명](blob:<uuid>)`.
+
+## Post views
+
+목록과 상세 응답에 `viewCount`가 있습니다. 값은 `blog.post_view_counts`에서 가져오며
+`blog.posts` 컬럼이 아닙니다. 목록은 페이지 전체 조회수를 한 번의 질의로 합칩니다.
+
+조회 기록은 `POST /api/posts/{slug}/view`입니다. 발행된 글만 받고 draft와 없는 slug는
+`404`입니다. 응답의 `counted`는 이 요청이 실제로 1건으로 집계됐는지를 알려줍니다.
+
+```http
+POST /api/posts/hello-world/view
+Content-Type: application/json
+
+{ "visitorId": "<클라이언트가 보관하는 UUID>" }
+```
+
+중복 제거는 `blog.post_views`의 `(post_id, visitor, viewed_on)` 복합 PK로 합니다. 같은
+방문자가 같은 날 몇 번 새로고침해도 1건입니다. `viewed_on`은 KST 날짜이므로 하루가
+바뀌면 다시 1건 집계됩니다. 합계는 insert trigger가 같은 트랜잭션에서 올리므로 동시
+요청이 서로의 증가분을 덮어쓰지 않습니다.
+
+`visitor`는 원문을 저장하지 않습니다. `visitorId`가 오면 그 값을, 없으면 클라이언트
+IP와 User-Agent 조합을 서버 시크릿 키로 HMAC-SHA256 해싱해 넣습니다. IPv4는 주소
+공간이 좁아 salt 없는 해시가 전수 대입으로 역산되기 때문입니다. 키는
+`VIEW_HASH_SALT`이며 없으면 `SUPABASE_SECRET_KEY`로 대체합니다. 식별할 근거가 전혀
+없으면(`visitorId`도 IP도 없음) 기록하지 않고 `counted: false`를 반환합니다 — 정체를
+모르는 요청을 한 명으로 합치면 조회수가 사실과 달라집니다.
+
+**브라우저에서 호출해야 합니다.** 서버 사이드 렌더링 중에 호출하면 IP가 프론트엔드
+서버의 것으로 잡혀 전 세계 방문자가 한 명으로 합쳐집니다. 프론트엔드는 클라이언트
+컴포넌트에서 `localStorage`에 보관한 `visitorId`와 함께 호출합니다.
+
+이 방식은 부정 집계를 막지 못합니다. `visitorId`를 계속 바꿔 보내면 조회수를 올릴 수
+있습니다. 개인 블로그 지표 목적이며 과금이나 정산 근거로 쓰지 않습니다.
 
 쿼리: `type` (`guide`\|`news`\|`stock`), `tag`, `locale` (`ko`\|`en`), `limit`,
 `offset`, `includeDrafts`.
@@ -149,6 +184,7 @@ HTTPS `SUPABASE_URL`이 필요합니다. 로그 레벨은 INFO로 고정입니�
 | `SUPABASE_URL` | Preview Supabase URL | Production Supabase URL | 서비스별 별도 프로젝트 |
 | `SUPABASE_PUBLISHABLE_KEY` | Preview publishable key | Production publishable key | readiness probe |
 | `SUPABASE_SECRET_KEY` | 필수 | 필수 | posts 읽기/쓰기용 서버 secret key; `sb_publishable_` 사용 불가 |
+| `VIEW_HASH_SALT` | 선택 | 선택 | 조회수 방문자 해싱 키. 없으면 `SUPABASE_SECRET_KEY`로 대체 |
 | `BLOG_API_KEY` | 쓰기·draft 조회에 필요 | 쓰기·draft 조회에 필요 | 긴 난수; `X-Blog-Key`로만 전달 |
 
 배포 전에 CLI 상태와 build 인자를 확인하고, Vercel 프로젝트 `fastapi-blog`을
