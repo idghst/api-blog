@@ -22,7 +22,7 @@ def test_vercel_upload_allowlist_excludes_non_runtime_directories() -> None:
     assert "!/app/**/*.py" in ignore_rules
     assert "tests/" not in ignore_rules
     assert "docs/" not in ignore_rules
-    assert "supabase/" not in ignore_rules
+    assert "db/" not in ignore_rules
 
 
 def test_ci_uses_locked_dependencies_without_a_tool_cache() -> None:
@@ -43,7 +43,7 @@ def test_ci_uses_locked_dependencies_without_a_tool_cache() -> None:
 def test_runbook_keeps_blog_deployment_boundaries_explicit() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "`blog` Supabase schema" in readme
+    assert "메인 Postgres의 `blog` DB" in readme
     assert "fastapi-blog" in readme
     assert "vercel deploy --target=preview" in readme
     assert "`--prebuilt`는 사용하지 않습니다" in readme

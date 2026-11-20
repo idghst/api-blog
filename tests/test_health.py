@@ -1,21 +1,15 @@
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
 from app.core.config import Settings, get_settings
-from app.core.errors import ApiError
 from app.main import create_app
+from tests.conftest import Sql, make_settings
 
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY=SecretStr("sb_publishable_test"),
-        SUPABASE_SECRET_KEY=SecretStr("sb_secret_test"),
-    )
+    return make_settings()
 
 
 @pytest.fixture
@@ -35,76 +29,28 @@ def test_health_and_liveness_return_ok(client: TestClient) -> None:
         assert response.json() == {"status": "ok"}
 
 
-def test_readiness_maps_unavailable_dependency_to_sanitized_503(
-    client: TestClient, app: FastAPI
-) -> None:
-    from app.api.routes.health import probe_supabase
+def test_readiness_checks_the_database(sql: Sql, client: TestClient) -> None:
+    response = client.get("/health/ready")
 
-    async def unavailable() -> None:
-        raise ApiError(503, "dependency_unavailable", "Supabase is unavailable")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
-    app.dependency_overrides[probe_supabase] = unavailable
 
-    response = client.get("/health/ready", headers={"X-Request-ID": "req-ready"})
+def test_readiness_maps_unavailable_database_to_sanitized_503() -> None:
+    app = create_app(
+        make_settings(DATABASE_URL="postgresql://u:secret@127.0.0.1:1/blog")
+    )
+
+    response = TestClient(app).get(
+        "/health/ready", headers={"X-Request-ID": "req-ready"}
+    )
 
     assert response.status_code == 503
     assert response.json() == {
         "code": "dependency_unavailable",
-        "message": "Supabase is unavailable",
+        "message": "Database is unavailable",
         "request_id": "req-ready",
     }
-
-
-def test_readiness_probes_auth_health_with_publishable_key_and_timeout(
-    monkeypatch: pytest.MonkeyPatch, settings: Settings
-) -> None:
-    from app.api.routes.health import probe_supabase
-
-    observed: dict[str, object] = {}
-
-    def healthy(url: str, **kwargs: object) -> httpx.Response:
-        observed["url"] = url
-        observed.update(kwargs)
-        return httpx.Response(204)
-
-    monkeypatch.setattr("app.api.routes.health.httpx.get", healthy)
-
-    probe_supabase(settings)
-
-    assert observed == {
-        "url": "https://test.supabase.co/auth/v1/health",
-        "headers": {"apikey": "sb_publishable_test"},
-        "timeout": 5.0,
-    }
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        httpx.ConnectError("connection refused"),
-        httpx.Response(503),
-    ],
-)
-def test_probe_supabase_sanitizes_upstream_failures(
-    monkeypatch: pytest.MonkeyPatch,
-    settings: Settings,
-    failure: httpx.HTTPError | httpx.Response,
-) -> None:
-    from app.api.routes.health import probe_supabase
-
-    def unavailable(_: str, **__: object) -> httpx.Response:
-        if isinstance(failure, Exception):
-            raise failure
-        return failure
-
-    monkeypatch.setattr("app.api.routes.health.httpx.get", unavailable)
-
-    with pytest.raises(ApiError) as caught:
-        probe_supabase(settings)
-
-    assert caught.value.status_code == 503
-    assert caught.value.code == "dependency_unavailable"
-    assert caught.value.message == "Supabase is unavailable"
 
 
 def test_factory_injects_supplied_settings_and_root_message(
@@ -119,16 +65,8 @@ def test_factory_injects_supplied_settings_and_root_message(
     assert response.json() == {"message": "Blog API"}
 
 
-def test_production_host_exposes_docs_and_openapi() -> None:
-    app = create_app(
-        Settings(
-            SUPABASE_URL="https://example.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY=SecretStr("sb_publishable_test"),
-            SUPABASE_SECRET_KEY=SecretStr("sb_secret_test"),
-            BLOG_API_KEY=SecretStr("administrator-secret"),
-        )
-    )
-    client = TestClient(app, base_url="http://api.example.com")
+def test_production_host_exposes_docs_and_openapi(settings: Settings) -> None:
+    client = TestClient(create_app(settings), base_url="http://api.example.com")
 
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert client.get(path).status_code == 200
@@ -140,57 +78,6 @@ def test_localhost_and_test_hosts_expose_docs(settings: Settings) -> None:
         client = TestClient(app, base_url=base_url)
         assert client.get("/openapi.json").status_code == 200
         assert client.get("/docs").status_code == 200
-
-
-def test_production_host_without_secret_key_returns_503() -> None:
-    app = create_app(
-        Settings(
-            SUPABASE_URL="https://example.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY=SecretStr("sb_publishable_test"),
-        )
-    )
-    client = TestClient(app, base_url="http://api.example.com")
-
-    live = client.get("/health")
-    root = client.get("/")
-
-    assert live.status_code == 200
-    assert root.status_code == 503
-    assert root.json()["code"] == "administrator_client_unavailable"
-
-
-def test_production_host_allows_public_reads_without_blog_key() -> None:
-    app = create_app(
-        Settings(
-            SUPABASE_URL="https://example.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY=SecretStr("sb_publishable_test"),
-            SUPABASE_SECRET_KEY=SecretStr("sb_secret_test"),
-        )
-    )
-    client = TestClient(app, base_url="http://api.example.com")
-
-    live = client.get("/health/live")
-    root = client.get("/")
-
-    assert live.status_code == 200
-    assert root.status_code == 200
-
-
-def test_production_host_rejects_http_supabase_url() -> None:
-    app = create_app(
-        Settings(
-            SUPABASE_URL="http://localhost:54321",
-            SUPABASE_PUBLISHABLE_KEY=SecretStr("sb_publishable_test"),
-            SUPABASE_SECRET_KEY=SecretStr("sb_secret_test"),
-            BLOG_API_KEY=SecretStr("administrator-secret"),
-        )
-    )
-    client = TestClient(app, base_url="http://api.example.com")
-
-    response = client.get("/")
-
-    assert response.status_code == 503
-    assert response.json()["code"] == "dependency_unavailable"
 
 
 def test_cors_allows_only_configured_origin(settings: Settings) -> None:

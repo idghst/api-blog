@@ -1,265 +1,113 @@
 from datetime import UTC, datetime
-from typing import Any
 
-import httpx
 from fastapi.testclient import TestClient
 
-from app.core.config import Settings
 from app.main import create_app
+from tests.conftest import BLOG_KEY, Sql, make_settings, seed_post
+
+AUTH = {"X-Blog-Key": BLOG_KEY}
 
 
-def sample_row(**overrides: object) -> dict[str, Any]:
-    row: dict[str, Any] = {
-        "id": 1,
-        "slug": "hello-world",
-        "title": "Hello",
-        "description": "Intro",
-        "type": "guide",
-        "tags": ["python"],
-        "body": "# Hello",
-        "ticker": None,
-        "cover": None,
-        "locale": "ko",
-        "draft": False,
-        "published_at": "2026-08-01T00:00:00+00:00",
-        "updated_at": "2026-08-02T00:00:00+00:00",
-        "created_at": "2026-08-01T00:00:00+00:00",
-    }
-    row.update(overrides)
-    return row
+def test_public_list_hides_drafts_filters_and_returns_camel_case(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql)
+    seed_post(sql, slug="draft", draft=True)
+    seed_post(sql, slug="news", type="news")
+    seed_post(sql, slug="other-tag", tags=["rust"])
+    seed_post(sql, slug="english", locale="en")
 
-
-class FakeResponse:
-    def __init__(self, data: list[dict[str, Any]], count: int | None = None) -> None:
-        self.data = data
-        self.count = len(data) if count is None else count
-
-
-class FakeQuery:
-    def __init__(self, response: FakeResponse) -> None:
-        self.response = response
-        self.filters: list[tuple[str, object]] = []
-        self.inserted: dict[str, Any] | None = None
-        self.updated: dict[str, Any] | None = None
-        self.updates: list[dict[str, Any]] = []
-        self.upserted: dict[str, Any] | None = None
-        self.upsert_options: dict[str, Any] | None = None
-        self.deleted = False
-        self.ordered: tuple[str, bool, bool | None] | None = None
-        self.ranged: tuple[int, int] | None = None
-        self.limited: int | None = None
-
-    def select(self, *_: object, count: object = None) -> "FakeQuery":
-        self.filters.append(("count", count))
-        return self
-
-    def eq(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((column, value))
-        return self
-
-    def contains(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((f"contains:{column}", value))
-        return self
-
-    def in_(self, column: str, values: object) -> "FakeQuery":
-        self.filters.append((f"in:{column}", list(values)))  # type: ignore[call-overload]
-        return self
-
-    def is_(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((f"is:{column}", value))
-        return self
-
-    def order(
-        self, column: str, *, desc: bool = False, nullsfirst: bool | None = None
-    ) -> "FakeQuery":
-        self.ordered = (column, desc, nullsfirst)
-        return self
-
-    def range(self, start: int, end: int) -> "FakeQuery":
-        self.ranged = (start, end)
-        return self
-
-    def limit(self, count: int) -> "FakeQuery":
-        self.limited = count
-        return self
-
-    def insert(self, payload: dict[str, Any]) -> "FakeQuery":
-        self.inserted = payload
-        return self
-
-    def upsert(
-        self,
-        payload: dict[str, Any],
-        *,
-        ignore_duplicates: bool = False,
-        on_conflict: str = "",
-    ) -> "FakeQuery":
-        self.upserted = payload
-        self.upsert_options = {
-            "ignore_duplicates": ignore_duplicates,
-            "on_conflict": on_conflict,
-        }
-        return self
-
-    def update(self, payload: dict[str, Any]) -> "FakeQuery":
-        self.updated = payload
-        self.updates.append(payload)
-        return self
-
-    def delete(self) -> "FakeQuery":
-        self.deleted = True
-        return self
-
-    async def execute(self) -> FakeResponse:
-        return self.response
-
-
-class SequencedQuery(FakeQuery):
-    def __init__(self, responses: list[FakeResponse]) -> None:
-        super().__init__(responses[0])
-        self.responses = list(responses)
-
-    async def execute(self) -> FakeResponse:  # type: ignore[override]
-        return self.responses.pop(0)
-
-
-class FakeClient:
-    def __init__(self, query: FakeQuery, view_counts: FakeQuery | None = None) -> None:
-        self.query = query
-        self.view_counts = view_counts or FakeQuery(FakeResponse([]))
-        self.requested: list[str] = []
-
-    def table(self, name: str) -> FakeQuery:
-        self.requested.append(name)
-        if name == "post_view_counts":
-            return self.view_counts
-        assert name == "posts"
-        return self.query
-
-
-class FailingQuery(FakeQuery):
-    async def execute(self) -> FakeResponse:  # type: ignore[override]
-        raise httpx.ConnectError("private upstream details")
-
-
-class FailingClient:
-    def table(self, name: str) -> FailingQuery:
-        return FailingQuery(FakeResponse([]))
-
-
-def make_app() -> tuple[object, Settings]:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="sb_secret_test",
-        BLOG_API_KEY="blog-test-key",
-    )
-    return create_app(settings), settings
-
-
-def override_client(app: object, fake: FakeClient) -> None:
-    from app.integrations.supabase import get_admin_client
-
-    async def admin_client():
-        yield fake
-
-    app.dependency_overrides[get_admin_client] = admin_client  # type: ignore[attr-defined]
-
-
-def test_public_list_hides_drafts_and_returns_camel_case() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()], count=1))
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).get(
-        "/api/posts?type=guide&tag=python&locale=ko&limit=10"
-    )
+    response = client.get("/api/posts?type=guide&tag=python&locale=ko&limit=10")
 
     assert response.status_code == 200
     body = response.json()
     assert body["count"] == 1
-    assert body["items"][0]["slug"] == "hello-world"
-    assert body["items"][0]["publishedAt"] == "2026-08-01T00:00:00Z"
-    assert "id" not in body["items"][0]
-    assert ("draft", False) in query.filters
-    assert ("type", "guide") in query.filters
-    assert ("contains:tags", ["python"]) in query.filters
-    assert ("locale", "ko") in query.filters
-    assert query.ordered == ("published_at", True, False)
-    assert query.ranged == (0, 9)
+    assert [item["slug"] for item in body["items"]] == ["hello-world"]
+    item = body["items"][0]
+    assert item["publishedAt"] == "2026-08-01T00:00:00Z"
+    assert item["tags"] == ["python"]
+    assert item["viewCount"] == 0
+    assert "id" not in item
 
 
-def test_include_drafts_requires_blog_key() -> None:
-    app, _ = make_app()
-    override_client(app, FakeClient(FakeQuery(FakeResponse([]))))
+def test_list_orders_by_publish_time_with_nulls_last_and_pages(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql, slug="old", published_at="2026-08-01T00:00:00Z")
+    seed_post(sql, slug="new", published_at="2026-08-03T00:00:00Z")
+    seed_post(sql, slug="unstamped", published_at=None)
 
-    response = TestClient(app).get("/api/posts?includeDrafts=true")
+    first = client.get("/api/posts?limit=2").json()
+    second = client.get("/api/posts?limit=2&offset=2").json()
+
+    assert [item["slug"] for item in first["items"]] == ["new", "old"]
+    assert first["count"] == 3
+    assert [item["slug"] for item in second["items"]] == ["unstamped"]
+    assert second["count"] == 3
+
+
+def test_offset_past_the_end_keeps_the_previous_error(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql)
+
+    assert client.get("/api/posts?offset=1").json()["items"] == []
+    response = client.get("/api/posts?offset=2")
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "database_request_failed"
+
+
+def test_include_drafts_requires_blog_key(client: TestClient) -> None:
+    response = client.get("/api/posts?includeDrafts=true")
 
     assert response.status_code == 401
     assert response.json()["code"] == "administrator_authentication_required"
 
 
-def test_include_drafts_with_key_skips_draft_filter() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(draft=True)], count=1))
-    override_client(app, FakeClient(query))
+def test_include_drafts_with_key_returns_drafts(client: TestClient, sql: Sql) -> None:
+    seed_post(sql, draft=True)
 
-    response = TestClient(app).get(
-        "/api/posts?includeDrafts=true",
-        headers={"X-Blog-Key": "blog-test-key"},
-    )
+    response = client.get("/api/posts?includeDrafts=true", headers=AUTH)
 
     assert response.status_code == 200
-    assert ("draft", False) not in query.filters
     assert response.json()["items"][0]["draft"] is True
 
 
-def test_admin_detail_with_key_can_load_drafts() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(draft=True)]))
-    override_client(app, FakeClient(query))
+def test_admin_detail_with_key_can_load_drafts(client: TestClient, sql: Sql) -> None:
+    seed_post(sql, draft=True)
 
-    response = TestClient(app).get(
-        "/api/posts/hello-world?includeDrafts=true",
-        headers={"X-Blog-Key": "blog-test-key"},
-    )
+    response = client.get("/api/posts/hello-world?includeDrafts=true", headers=AUTH)
 
     assert response.status_code == 200
-    assert ("draft", False) not in query.filters
     assert response.json()["draft"] is True
 
 
-def test_public_detail_filters_drafts() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()]))
-    override_client(app, FakeClient(query))
+def test_public_detail_hides_drafts(client: TestClient, sql: Sql) -> None:
+    seed_post(sql)
+    seed_post(sql, slug="draft", draft=True)
 
-    response = TestClient(app).get("/api/posts/hello-world")
-
-    assert response.status_code == 200
-    assert ("slug", "hello-world") in query.filters
-    assert ("draft", False) in query.filters
-    assert query.limited == 1
-
-
-def test_missing_post_returns_404() -> None:
-    app, _ = make_app()
-    override_client(app, FakeClient(FakeQuery(FakeResponse([]))))
-
-    response = TestClient(app).get("/api/posts/missing")
+    assert client.get("/api/posts/hello-world").status_code == 200
+    response = client.get("/api/posts/draft")
 
     assert response.status_code == 404
     assert response.json()["code"] == "post_not_found"
 
 
-def test_create_post_requires_key_and_inserts_snake_case() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()]))
-    override_client(app, FakeClient(query))
+def test_create_post_requires_key(client: TestClient) -> None:
+    response = client.post(
+        "/api/posts", json={"slug": "x", "title": "x", "type": "guide", "body": "b"}
+    )
 
-    response = TestClient(app).post(
+    assert response.status_code == 401
+
+
+def test_create_post_stores_snake_case_and_stamps_publish_time(
+    client: TestClient, sql: Sql
+) -> None:
+    response = client.post(
         "/api/posts",
-        headers={"X-Blog-Key": "blog-test-key"},
+        headers=AUTH,
         json={
             "slug": "hello-world",
             "title": "Hello",
@@ -272,221 +120,137 @@ def test_create_post_requires_key_and_inserts_snake_case() -> None:
     )
 
     assert response.status_code == 201
-    assert query.inserted is not None
-    assert query.inserted["slug"] == "hello-world"
-    assert query.inserted["type"] == "guide"
-    assert response.json()["createdAt"] == "2026-08-01T00:00:00Z"
-
-
-def test_create_published_post_stamps_publish_time() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()]))
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).post(
-        "/api/posts",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"slug": "hello-world", "title": "Hello", "type": "guide", "body": "hi"},
-    )
-
-    assert response.status_code == 201
-    assert query.inserted is not None
-    stamped = datetime.fromisoformat(query.inserted["published_at"])
-    assert stamped.tzinfo is not None
+    body = response.json()
+    assert body["slug"] == "hello-world"
+    assert body["createdAt"].endswith("Z")
+    stamped = datetime.fromisoformat(body["publishedAt"])
     assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
+    row = sql("select tags, type from blog.posts where slug = 'hello-world'")[0]
+    assert row == {"tags": ["python"], "type": "guide"}
 
 
-def test_create_draft_post_leaves_publish_time_empty() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(draft=True, published_at=None)]))
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).post(
+def test_create_draft_post_leaves_publish_time_empty(client: TestClient) -> None:
+    response = client.post(
         "/api/posts",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={
-            "slug": "hello-world",
-            "title": "Hello",
-            "type": "guide",
-            "body": "hi",
-            "draft": True,
-        },
+        headers=AUTH,
+        json={"slug": "d", "title": "D", "type": "guide", "body": "b", "draft": True},
     )
 
     assert response.status_code == 201
-    assert query.inserted is not None
-    assert "published_at" not in query.inserted
     assert response.json()["publishedAt"] is None
 
 
-def test_create_post_keeps_explicit_publish_time() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()]))
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).post(
+def test_create_post_keeps_explicit_publish_time(client: TestClient) -> None:
+    response = client.post(
         "/api/posts",
-        headers={"X-Blog-Key": "blog-test-key"},
+        headers=AUTH,
         json={
-            "slug": "hello-world",
-            "title": "Hello",
+            "slug": "x",
+            "title": "X",
             "type": "guide",
-            "body": "hi",
-            "publishedAt": "2026-08-01T09:30:00Z",
+            "body": "b",
+            "publishedAt": "2026-08-01T18:30:00+09:00",
         },
     )
 
     assert response.status_code == 201
-    assert query.inserted is not None
-    assert datetime.fromisoformat(query.inserted["published_at"]) == datetime(
-        2026, 8, 1, 9, 30, tzinfo=UTC
+    assert response.json()["publishedAt"] == "2026-08-01T09:30:00Z"
+
+
+def test_duplicate_slug_returns_409(client: TestClient, sql: Sql) -> None:
+    seed_post(sql)
+
+    response = client.post(
+        "/api/posts",
+        headers=AUTH,
+        json={"slug": "hello-world", "title": "X", "type": "guide", "body": "b"},
     )
 
+    assert response.status_code == 409
+    assert response.json()["code"] == "post_slug_exists"
 
-def test_patch_post_updates_by_slug() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(title="Updated")]))
-    override_client(app, FakeClient(query))
 
-    response = TestClient(app).patch(
+def test_patch_post_updates_by_slug(client: TestClient, sql: Sql) -> None:
+    seed_post(sql)
+
+    response = client.patch(
         "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"title": "Updated"},
+        headers=AUTH,
+        json={"title": "Updated", "tags": ["a", "b"]},
     )
 
     assert response.status_code == 200
-    assert query.updated == {"title": "Updated"}
-    assert ("slug", "hello-world") in query.filters
     assert response.json()["title"] == "Updated"
+    assert response.json()["tags"] == ["a", "b"]
 
 
-def test_patch_publishing_stamps_missing_publish_time() -> None:
-    app, _ = make_app()
-    published = sample_row(draft=False, published_at="2026-08-05T02:15:00+00:00")
-    query = SequencedQuery(
-        [
-            FakeResponse([sample_row(draft=False, published_at=None)]),
-            FakeResponse([published]),
-        ]
-    )
-    override_client(app, FakeClient(query))
+def test_patch_publishing_stamps_missing_publish_time(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql, draft=True, published_at=None)
 
-    response = TestClient(app).patch(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"draft": False},
+    response = client.patch(
+        "/api/posts/hello-world", headers=AUTH, json={"draft": False}
     )
 
     assert response.status_code == 200
-    assert len(query.updates) == 2
-    assert query.updates[0] == {"draft": False}
-    stamped = datetime.fromisoformat(query.updates[1]["published_at"])
+    stamped = datetime.fromisoformat(response.json()["publishedAt"])
     assert abs((datetime.now(UTC) - stamped).total_seconds()) < 60
-    assert ("is:published_at", None) in query.filters
-    assert response.json()["publishedAt"] == "2026-08-05T02:15:00Z"
 
 
-def test_patch_publishing_keeps_existing_publish_time() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(draft=False)]))
-    override_client(app, FakeClient(query))
+def test_patch_publishing_keeps_existing_publish_time(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql, draft=True)
 
-    response = TestClient(app).patch(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"draft": False},
+    response = client.patch(
+        "/api/posts/hello-world", headers=AUTH, json={"draft": False}
     )
 
-    assert response.status_code == 200
-    assert query.updates == [{"draft": False}]
     assert response.json()["publishedAt"] == "2026-08-01T00:00:00Z"
 
 
-def test_patch_to_draft_does_not_stamp_publish_time() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row(draft=True, published_at=None)]))
-    override_client(app, FakeClient(query))
+def test_patch_to_draft_does_not_stamp_publish_time(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql, draft=False, published_at=None)
 
-    response = TestClient(app).patch(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"draft": True},
-    )
-
-    assert response.status_code == 200
-    assert query.updates == [{"draft": True}]
-    assert response.json()["publishedAt"] is None
-
-
-def test_patch_publish_stamp_lost_race_still_returns_post() -> None:
-    app, _ = make_app()
-    query = SequencedQuery(
-        [
-            FakeResponse([sample_row(draft=False, published_at=None)]),
-            FakeResponse([]),
-        ]
-    )
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).patch(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={"draft": False},
+    response = client.patch(
+        "/api/posts/hello-world", headers=AUTH, json={"draft": True}
     )
 
     assert response.status_code == 200
     assert response.json()["publishedAt"] is None
 
 
-def test_empty_patch_is_rejected() -> None:
-    app, _ = make_app()
-    override_client(app, FakeClient(FakeQuery(FakeResponse([]))))
-
-    response = TestClient(app).patch(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-        json={},
-    )
-
-    assert response.status_code == 422
-    assert response.json()["code"] == "validation_error"
-
-
-def test_delete_post_returns_204() -> None:
-    app, _ = make_app()
-    query = FakeQuery(FakeResponse([sample_row()]))
-    override_client(app, FakeClient(query))
-
-    response = TestClient(app).delete(
-        "/api/posts/hello-world",
-        headers={"X-Blog-Key": "blog-test-key"},
-    )
-
-    assert response.status_code == 204
-    assert query.deleted is True
-    assert ("slug", "hello-world") in query.filters
-
-
-def test_delete_missing_post_returns_404() -> None:
-    app, _ = make_app()
-    override_client(app, FakeClient(FakeQuery(FakeResponse([]))))
-
-    response = TestClient(app).delete(
-        "/api/posts/missing",
-        headers={"X-Blog-Key": "blog-test-key"},
-    )
+def test_patch_missing_post_returns_404(client: TestClient, sql: Sql) -> None:
+    response = client.patch("/api/posts/missing", headers=AUTH, json={"title": "x"})
 
     assert response.status_code == 404
     assert response.json()["code"] == "post_not_found"
 
 
-def test_invalid_type_is_rejected() -> None:
-    app, _ = make_app()
-    override_client(app, FakeClient(FakeQuery(FakeResponse([]))))
+def test_empty_patch_is_rejected(client: TestClient) -> None:
+    response = client.patch("/api/posts/hello-world", headers=AUTH, json={})
 
-    response = TestClient(app).post(
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
+def test_delete_post_returns_204_then_404(client: TestClient, sql: Sql) -> None:
+    seed_post(sql)
+
+    assert client.delete("/api/posts/hello-world", headers=AUTH).status_code == 204
+    response = client.delete("/api/posts/hello-world", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "post_not_found"
+
+
+def test_invalid_type_is_rejected(client: TestClient) -> None:
+    response = client.post(
         "/api/posts",
-        headers={"X-Blog-Key": "blog-test-key"},
+        headers=AUTH,
         json={"slug": "x", "title": "x", "type": "essay", "body": "body"},
     )
 
@@ -495,11 +259,12 @@ def test_invalid_type_is_rejected() -> None:
 
 
 def test_store_outage_is_sanitized() -> None:
-    app, _ = make_app()
-    override_client(app, FailingClient())  # type: ignore[arg-type]
+    app = create_app(
+        make_settings(DATABASE_URL="postgresql://u:secret@127.0.0.1:1/blog")
+    )
 
     response = TestClient(app).get("/api/posts")
 
     assert response.status_code == 503
     assert response.json()["code"] == "database_unavailable"
-    assert "private" not in response.json()["message"]
+    assert "secret" not in response.text

@@ -1,42 +1,10 @@
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import (
-    Settings,
-    clear_settings_cache,
-    get_settings,
-    resolve_app_env,
-)
+from app.core.config import Settings, clear_settings_cache, get_settings
 from app.core.url_validation import require_http_origin
 
-
-def test_schema_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_SCHEMA", "public")
-
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.supabase_schema == "blog"
-
-
-@pytest.mark.parametrize(
-    ("host", "url", "expected"),
-    [
-        ("testserver", "http://testserver/docs", "test"),
-        ("api-test.vercel.app", "", "test"),
-        ("", "https://blog-test.example.com/health", "test"),
-        ("dev.example.com", "", "development"),
-        ("localhost:8000", "http://localhost:8000/", "development"),
-        ("127.0.0.1:8000", "", "development"),
-        ("api.example.com", "https://api.example.com/docs", "production"),
-        ("fastapi-blog.vercel.app", "", "production"),
-        ("test-dev.example.com", "", "test"),
-    ],
-)
-def test_resolve_app_env_from_host_and_url(host: str, url: str, expected: str) -> None:
-    assert resolve_app_env(host, url) == expected
+URL = "postgresql://blog_app@db:5432/blog"
 
 
 def test_removed_env_fields_are_not_settings() -> None:
@@ -44,50 +12,41 @@ def test_removed_env_fields_are_not_settings() -> None:
     assert "LOG_LEVEL" not in Settings.model_fields
     assert "ENABLE_DOCS" not in Settings.model_fields
     assert "CORS_ORIGINS" not in Settings.model_fields
-    assert "SUPABASE_TIMEOUT_SECONDS" not in Settings.model_fields
+    assert not [name for name in Settings.model_fields if "SUPABASE" in name]
 
 
-def test_app_name_is_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
+def test_app_name_and_timeout_are_fixed() -> None:
+    settings = Settings(DATABASE_URL=URL)
 
     assert settings.app_name == "Blog API"
+    assert settings.DB_TIMEOUT_SECONDS == 5
 
 
-def test_timeout_is_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.SUPABASE_TIMEOUT_SECONDS == 5.0
-
-
-def test_local_allows_http_supabase_url() -> None:
-    settings = Settings(
-        SUPABASE_URL="http://localhost:54321",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert str(settings.SUPABASE_URL) == "http://localhost:54321/"
-
-
-@pytest.mark.parametrize("supabase_url", ["not-a-url", "ftp://test.supabase.co"])
-def test_supabase_url_must_be_http_url(supabase_url: str) -> None:
+@pytest.mark.parametrize("url", ["", "mysql://db/blog", "https://db.example.com"])
+def test_database_url_must_be_postgres(url: str) -> None:
     with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL=supabase_url,
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        )
+        Settings(DATABASE_URL=url)
+
+
+def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_URL")
+
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_optional_secrets_default_to_none_and_blank_becomes_none() -> None:
+    assert Settings(DATABASE_URL=URL).BLOG_API_KEY is None
+    settings = Settings(DATABASE_URL=URL, BLOG_API_KEY="   ", VIEW_HASH_SALT=" ")
+
+    assert settings.BLOG_API_KEY is None
+    assert settings.VIEW_HASH_SALT is None
+    assert settings.view_hash_secret() is None
+    assert Settings(DATABASE_URL=URL, VIEW_HASH_SALT="s").view_hash_secret() == "s"
 
 
 def test_cors_origins_are_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
+    settings = Settings(DATABASE_URL=URL)
 
     assert settings.CORS_ORIGINS == [
         "http://localhost:3000",
@@ -140,102 +99,14 @@ def test_cors_allows_concrete_origins(cors_origin: str) -> None:
     assert require_http_origin(cors_origin, allow_root_path=False) == cors_origin
 
 
-@pytest.mark.parametrize(
-    "supabase_url",
-    [
-        "https://user:password@test.supabase.co",
-        "https://test.supabase.co/rest/v1",
-        "https://test.supabase.co?preview=true",
-        "https://test.supabase.co#section",
-        "https://test.supabase.co\\evil.com",
-        "https://test.supabase.co:",
-        "https://.",
-        "https://test.supabase.co\n",
-        "https://test.supabase.co\x00",
-    ],
-)
-def test_supabase_url_rejects_non_origin_values(supabase_url: str) -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL=supabase_url,
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        )
-
-
-def test_https_supabase_origin_is_allowed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://api.example.com:8443",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="sb_secret_test",
-        BLOG_API_KEY="administrator-secret",
-    )
-
-    assert str(settings.SUPABASE_URL) == "https://api.example.com:8443/"
-
-
-def test_publishable_key_must_not_be_blank() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="   ",
-        )
-
-
-def test_blank_optional_secret_becomes_none() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="   ",
-    )
-
-    assert settings.SUPABASE_SECRET_KEY is None
-
-
-def test_publishable_key_cannot_be_used_as_server_secret() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-            SUPABASE_SECRET_KEY="sb_publishable_test",
-        )
-
-
-def test_secret_client_rejects_a_publishable_key() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-            SUPABASE_SECRET_KEY="sb_publishable_not-a-server-key",
-        )
-
-
-def test_administrator_credentials_are_optional_at_settings_time() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.SUPABASE_SECRET_KEY is None
-    assert settings.BLOG_API_KEY is None
-
-
-def test_blank_blog_api_key_becomes_none() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        BLOG_API_KEY="   ",
-    )
-
-    assert settings.BLOG_API_KEY is None
-
-
 def test_settings_cache_can_be_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_settings_cache()
-    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
-    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
+    monkeypatch.setenv("DATABASE_URL", URL)
     first = get_settings()
-    monkeypatch.setenv("SUPABASE_URL", "https://other.supabase.co")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://other@db/blog")
     assert get_settings() is first
 
     clear_settings_cache()
-    assert str(get_settings().SUPABASE_URL) == "https://other.supabase.co/"
+    assert (
+        get_settings().DATABASE_URL.get_secret_value() == "postgresql://other@db/blog"
+    )

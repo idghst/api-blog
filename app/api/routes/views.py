@@ -4,13 +4,13 @@ from fastapi import APIRouter, Depends, Request
 
 from app.core.config import Settings, get_settings
 from app.core.visitor import resolve_visitor
-from app.integrations.supabase import get_admin_client
+from app.integrations.postgres import get_db
 from app.schemas import PostViewCreate, PostViewOut
 from app.services import views
-from supabase import AsyncClient
+from app.services.db import Db
 
 router = APIRouter(prefix="/posts", tags=["views"])
-AdminClient = Annotated[AsyncClient, Depends(get_admin_client)]
+Conn = Annotated[Db, Depends(get_db)]
 CurrentSettings = Annotated[Settings, Depends(get_settings)]
 
 
@@ -18,11 +18,11 @@ CurrentSettings = Annotated[Settings, Depends(get_settings)]
 async def record_post_view(
     slug: str,
     request: Request,
-    client: AdminClient,
+    conn: Conn,
     settings: CurrentSettings,
     view_input: PostViewCreate | None = None,
 ) -> PostViewOut:
     visitor = resolve_visitor(
         settings, request, view_input.visitor_id if view_input else None
     )
-    return await views.record_view(client, slug, visitor=visitor)
+    return await views.record_view(conn, slug, visitor=visitor)

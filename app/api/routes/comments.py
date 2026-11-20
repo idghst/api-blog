@@ -3,20 +3,20 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from fastapi import status as http_status
 
-from app.integrations.supabase import get_admin_client
+from app.integrations.postgres import get_db
 from app.schemas import CommentCreate, CommentList, CommentOut
 from app.services import comments
-from supabase import AsyncClient
+from app.services.db import Db
 
 router = APIRouter(prefix="/posts", tags=["comments"])
-AdminClient = Annotated[AsyncClient, Depends(get_admin_client)]
+Conn = Annotated[Db, Depends(get_db)]
 
 
 @router.get(
     "/{slug}/comments", response_model=CommentList, response_model_by_alias=True
 )
-async def list_comments(slug: str, client: AdminClient) -> CommentList:
-    return await comments.list_comments(client, slug)
+async def list_comments(slug: str, conn: Conn) -> CommentList:
+    return await comments.list_comments(conn, slug)
 
 
 @router.post(
@@ -28,6 +28,6 @@ async def list_comments(slug: str, client: AdminClient) -> CommentList:
 async def create_comment(
     slug: str,
     comment_input: CommentCreate,
-    client: AdminClient,
+    conn: Conn,
 ) -> CommentOut:
-    return await comments.create_comment(client, slug, comment_input)
+    return await comments.create_comment(conn, slug, comment_input)
