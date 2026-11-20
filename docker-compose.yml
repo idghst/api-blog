@@ -1,0 +1,33 @@
+# 맥미니 배포: Cloudflare → cloudflared → proxy(web 네트워크) → api-blog:8000.
+# DB는 공용 Postgres(project/데이터베이스의 postgres 컨테이너)가 blog-internal 네트워크에 db 별칭으로 붙는다.
+# 처음 한 번: docker network create blog-internal
+# 운영 env 파일은 저장소 밖 안정 경로를 가리킨다:
+#   API_BLOG_ENV_FILE=/Volumes/Sandisk/Users/idghst/project/blog/api-blog/.env.macmini docker compose up -d --build
+name: api-blog
+services:
+  api-blog:
+    build: .
+    image: api-blog:macmini
+    container_name: api-blog  # proxy가 web 네트워크에서 이 이름으로 찾는다
+    restart: unless-stopped
+    env_file: ${API_BLOG_ENV_FILE:-.env}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [web, internal]
+networks:
+  web:
+    external: true
+  internal:
+    name: blog-internal
+    external: true
