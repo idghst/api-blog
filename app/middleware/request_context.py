@@ -9,15 +9,8 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from app.core.config import Settings, resolve_app_env
-from app.core.errors import _error_response
-
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
 logger = logging.getLogger(__name__)
-
-
-def _is_liveness_path(path: str) -> bool:
-    return path in {"/health", "/health/live"}
 
 
 def resolve_request_id(value: str | None) -> str:
@@ -41,30 +34,6 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         exception_type: str | None = None
 
         try:
-            if (
-                resolve_app_env(request.headers.get("host", ""), str(request.url))
-                == "production"
-            ):
-                settings = getattr(request.app.state, "settings", None)
-                if isinstance(settings, Settings) and not _is_liveness_path(
-                    request.url.path
-                ):
-                    if settings.SUPABASE_URL.scheme != "https":
-                        status = 503
-                        return _error_response(
-                            request,
-                            503,
-                            "dependency_unavailable",
-                            "Supabase is unavailable",
-                        )
-                    if settings.SUPABASE_SECRET_KEY is None:
-                        status = 503
-                        return _error_response(
-                            request,
-                            503,
-                            "administrator_client_unavailable",
-                            "Administrator client is unavailable",
-                        )
             response = await call_next(request)
             status = response.status_code
             response.headers["X-Request-ID"] = request_id

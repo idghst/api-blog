@@ -1,18 +1,19 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.core.errors import ApiError
 from app.core.visitor import resolve_visitor
+from app.main import create_app
+from app.services import posts
 from app.services.views import KST
-from tests.test_comments import RoutingFakeClient, make_app, override_client
-from tests.test_posts import FakeQuery, FakeResponse, sample_row
+from tests.conftest import Sql, make_settings, seed_post
 
-
-def counts_row(total: int, post_id: int = 1) -> dict[str, Any]:
-    return {"post_id": post_id, "total": total}
+VIEW = "/api/posts/hello-world/view"
 
 
 def build_request(headers: list[tuple[bytes, bytes]], client: Any = None) -> Request:
@@ -20,197 +21,123 @@ def build_request(headers: list[tuple[bytes, bytes]], client: Any = None) -> Req
         {
             "type": "http",
             "method": "POST",
-            "path": "/api/posts/hello-world/view",
+            "path": VIEW,
             "headers": headers,
             "client": client,
         }
     )
 
 
-def test_first_view_is_recorded_and_returns_the_total() -> None:
-    app, _ = make_app()
-    views = FakeQuery(FakeResponse([{"post_id": 1, "visitor": "hashed"}]))
-    counts = FakeQuery(FakeResponse([counts_row(1)]))
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": views,
-            "post_view_counts": counts,
-        }
-    )
-    override_client(app, fake)
+def test_first_view_is_counted_and_a_refresh_is_not(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql)
 
-    response = TestClient(app).post(
-        "/api/posts/hello-world/view", json={"visitorId": "device-a"}
-    )
+    first = client.post(VIEW, json={"visitorId": "device-a"})
+    again = client.post(VIEW, json={"visitorId": "device-a"})
+    other = client.post(VIEW, json={"visitorId": "device-b"})
 
-    assert response.status_code == 200
-    assert response.json() == {"slug": "hello-world", "viewCount": 1, "counted": True}
-    assert views.upserted is not None
-    assert views.upserted["post_id"] == 1
-    assert views.upsert_options == {
-        "ignore_duplicates": True,
-        "on_conflict": "post_id,visitor,viewed_on",
-    }
+    assert first.json() == {"slug": "hello-world", "viewCount": 1, "counted": True}
+    assert again.json() == {"slug": "hello-world", "viewCount": 1, "counted": False}
+    assert other.json() == {"slug": "hello-world", "viewCount": 2, "counted": True}
 
 
-def test_refresh_by_the_same_visitor_is_not_counted_again() -> None:
-    app, _ = make_app()
-    views = FakeQuery(FakeResponse([]))
-    counts = FakeQuery(FakeResponse([counts_row(7)]))
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": views,
-            "post_view_counts": counts,
-        }
-    )
-    override_client(app, fake)
+def test_view_is_bucketed_by_the_korean_calendar_day(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql)
 
-    response = TestClient(app).post(
-        "/api/posts/hello-world/view", json={"visitorId": "device-a"}
-    )
+    client.post(VIEW, json={"visitorId": "device-a"})
 
-    assert response.status_code == 200
-    assert response.json() == {"slug": "hello-world", "viewCount": 7, "counted": False}
-
-
-def test_view_is_bucketed_by_the_korean_calendar_day() -> None:
-    app, _ = make_app()
-    views = FakeQuery(FakeResponse([{"post_id": 1}]))
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": views,
-            "post_view_counts": FakeQuery(FakeResponse([counts_row(1)])),
-        }
-    )
-    override_client(app, fake)
-
-    TestClient(app).post("/api/posts/hello-world/view", json={"visitorId": "device-a"})
-
-    assert views.upserted is not None
-    assert views.upserted["viewed_on"] == datetime.now(KST).date().isoformat()
+    rows = sql("select viewed_on from blog.post_views")
+    assert rows == [{"viewed_on": datetime.now(KST).date()}]
     assert KST == timezone(timedelta(hours=9))
 
 
-def test_view_without_a_visitor_id_falls_back_to_the_request_origin() -> None:
-    app, _ = make_app()
-    views = FakeQuery(FakeResponse([{"post_id": 1}]))
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": views,
-            "post_view_counts": FakeQuery(FakeResponse([counts_row(1)])),
-        }
-    )
-    override_client(app, fake)
+def test_view_without_a_visitor_id_falls_back_to_the_request_origin(
+    client: TestClient, sql: Sql
+) -> None:
+    seed_post(sql)
 
-    response = TestClient(app).post(
-        "/api/posts/hello-world/view",
+    response = client.post(
+        VIEW,
         headers={"X-Forwarded-For": "203.0.113.9, 70.41.3.18", "User-Agent": "probe"},
     )
 
-    assert response.status_code == 200
     assert response.json()["counted"] is True
-    assert views.upserted is not None
-    visitor = views.upserted["visitor"]
+    visitor = sql("select visitor from blog.post_views")[0]["visitor"]
     assert len(visitor) == 64
     assert "203.0.113.9" not in visitor
     assert "probe" not in visitor
 
 
-def test_view_on_a_draft_post_is_not_found() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([])),
-            "post_views": FakeQuery(FakeResponse([])),
-            "post_view_counts": FakeQuery(FakeResponse([])),
-        }
-    )
-    override_client(app, fake)
+def test_unidentifiable_request_is_not_recorded(sql: Sql) -> None:
+    seed_post(sql)
+    client = TestClient(create_app(make_settings(VIEW_HASH_SALT=None)))
 
-    response = TestClient(app).post("/api/posts/secret/view")
+    response = client.post(VIEW, json={"visitorId": "device-a"})
+
+    assert response.json() == {"slug": "hello-world", "viewCount": 0, "counted": False}
+    assert sql("select * from blog.post_views") == []
+
+
+def test_view_on_a_draft_post_is_not_found(client: TestClient, sql: Sql) -> None:
+    seed_post(sql, draft=True)
+
+    response = client.post(VIEW)
 
     assert response.status_code == 404
     assert response.json()["code"] == "post_not_found"
 
 
-def test_unknown_visitor_count_defaults_to_zero() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": FakeQuery(FakeResponse([{"post_id": 1}])),
-            "post_view_counts": FakeQuery(FakeResponse([])),
-        }
-    )
-    override_client(app, fake)
+def test_blank_visitor_id_is_rejected(client: TestClient, sql: Sql) -> None:
+    seed_post(sql)
 
-    response = TestClient(app).post(
-        "/api/posts/hello-world/view", json={"visitorId": "device-a"}
-    )
-
-    assert response.status_code == 200
-    assert response.json()["viewCount"] == 0
-
-
-def test_blank_visitor_id_is_rejected() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": FakeQuery(FakeResponse([])),
-            "post_view_counts": FakeQuery(FakeResponse([])),
-        }
-    )
-    override_client(app, fake)
-
-    response = TestClient(app).post(
-        "/api/posts/hello-world/view", json={"visitorId": ""}
-    )
+    response = client.post(VIEW, json={"visitorId": ""})
 
     assert response.status_code == 422
     assert response.json()["code"] == "validation_error"
 
 
-def test_posts_list_and_detail_carry_the_view_count() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([sample_row()], count=1)),
-            "post_view_counts": FakeQuery(FakeResponse([counts_row(42)])),
-        }
+def test_posts_list_and_detail_carry_the_view_count(
+    client: TestClient, sql: Sql
+) -> None:
+    post = seed_post(sql)
+    seed_post(sql, slug="unseen")
+    sql(
+        "insert into blog.post_view_counts (post_id, total) values (%s, 42)",
+        (post["id"],),
     )
-    override_client(app, fake)
-    client = TestClient(app)
 
-    assert client.get("/api/posts").json()["items"][0]["viewCount"] == 42
+    items = client.get("/api/posts").json()["items"]
+
+    assert {item["slug"]: item["viewCount"] for item in items} == {
+        "hello-world": 42,
+        "unseen": 0,
+    }
     assert client.get("/api/posts/hello-world").json()["viewCount"] == 42
+    assert client.get("/api/posts/unseen").json()["viewCount"] == 0
 
 
-def test_posts_without_recorded_views_report_zero() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([sample_row()], count=1)),
-            "post_view_counts": FakeQuery(FakeResponse([])),
-        }
-    )
-    override_client(app, fake)
+def test_empty_list_page_returns_no_items(client: TestClient, sql: Sql) -> None:
+    response = client.get("/api/posts")
 
-    assert TestClient(app).get("/api/posts").json()["items"][0]["viewCount"] == 0
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "count": 0}
+
+
+def test_corrupt_row_is_reported_as_a_store_error() -> None:
+    with pytest.raises(ApiError) as raised:
+        posts._output({"slug": "x", "type": "essay"})
+    with pytest.raises(ApiError):
+        posts._as_nonneg_int(-1)
+
+    assert raised.value.status_code == 502
+    assert raised.value.code == "database_response_invalid"
 
 
 def _settings(**overrides: object) -> Settings:
-    values: dict[str, object] = {
-        "SUPABASE_URL": "https://test.supabase.co",
-        "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
-        "SUPABASE_SECRET_KEY": "sb_secret_test",
-    }
-    values.update(overrides)
-    return Settings(**values)  # type: ignore[arg-type]
+    return make_settings(**overrides)
 
 
 def test_visitor_id_hash_is_stable_and_unique_per_device() -> None:
@@ -226,25 +153,21 @@ def test_visitor_id_hash_is_stable_and_unique_per_device() -> None:
     assert first is not None and "device-a" not in first
 
 
-def test_dedicated_salt_overrides_the_secret_key_for_visitor_hashing() -> None:
+def test_salt_changes_the_visitor_hash() -> None:
     request = build_request([])
 
-    with_secret = resolve_visitor(_settings(), request, "device-a")
-    with_salt = resolve_visitor(
-        _settings(VIEW_HASH_SALT="separate-salt"), request, "device-a"
-    )
+    first = resolve_visitor(_settings(), request, "device-a")
+    second = resolve_visitor(_settings(VIEW_HASH_SALT="other"), request, "device-a")
 
-    assert with_secret != with_salt
+    assert first != second
 
 
 def test_request_without_any_identity_is_not_identified() -> None:
-    settings = _settings()
-
-    assert resolve_visitor(settings, build_request([]), None) is None
+    assert resolve_visitor(_settings(), build_request([]), None) is None
 
 
 def test_visitor_is_not_identified_without_a_hashing_secret() -> None:
-    settings = _settings(SUPABASE_SECRET_KEY=None)
+    settings = _settings(VIEW_HASH_SALT="  ")
     request = build_request([(b"x-forwarded-for", b"203.0.113.9")])
 
     assert resolve_visitor(settings, request, "device-a") is None
@@ -260,60 +183,3 @@ def test_direct_client_address_is_used_when_no_proxy_header_is_present() -> None
 
     assert forwarded is not None
     assert forwarded == direct
-
-
-def test_unidentifiable_request_is_not_recorded() -> None:
-    from app.services.views import record_view
-
-    views = FakeQuery(FakeResponse([]))
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([{"id": 1}])),
-            "post_views": views,
-            "post_view_counts": FakeQuery(FakeResponse([counts_row(5)])),
-        }
-    )
-
-    async def run() -> Any:
-        return await record_view(fake, "hello-world", visitor=None)  # type: ignore[arg-type]
-
-    import asyncio
-
-    result = asyncio.run(run())
-
-    assert result.counted is False
-    assert result.view_count == 5
-    assert views.upserted is None
-
-
-def test_empty_list_page_skips_the_view_count_query() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([], count=0)),
-            "post_view_counts": FakeQuery(FakeResponse([])),
-        }
-    )
-    override_client(app, fake)
-
-    response = TestClient(app).get("/api/posts")
-
-    assert response.status_code == 200
-    assert response.json() == {"items": [], "count": 0}
-    assert "post_view_counts" not in fake.requested
-
-
-def test_corrupt_view_total_is_reported_as_a_store_error() -> None:
-    app, _ = make_app()
-    fake = RoutingFakeClient(
-        {
-            "posts": FakeQuery(FakeResponse([sample_row()], count=1)),
-            "post_view_counts": FakeQuery(FakeResponse([counts_row(-1)])),
-        }
-    )
-    override_client(app, fake)
-
-    response = TestClient(app).get("/api/posts/hello-world")
-
-    assert response.status_code == 502
-    assert response.json()["code"] == "database_response_invalid"

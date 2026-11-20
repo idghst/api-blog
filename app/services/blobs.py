@@ -7,10 +7,9 @@ from pydantic import ValidationError
 
 from app.core.errors import ApiError
 from app.schemas import BlobCreate, BlobMeta
-from app.services.postgrest import ensure_row, execute_query, invalid_response
-from supabase import AsyncClient
+from app.services.db import Db, ensure_row, fetch, invalid_response
 
-TABLE_NAME = "blobs"
+_META_COLUMNS = "id::text as id, description, mime_type, created_at"
 _NOT_FOUND = ("blob_not_found", "Blob was not found")
 _MAX_BYTES = 2_000_000
 
@@ -23,16 +22,9 @@ def _meta(row: dict[str, Any]) -> BlobMeta:
 
 
 def decode_bytea(value: object) -> bytes:
-    if isinstance(value, memoryview):
-        value = value.tobytes()
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value)
-    if isinstance(value, str) and value.startswith("\\x"):
-        try:
-            return bytes.fromhex(value[2:])
-        except ValueError as error:
-            raise invalid_response() from error
-    raise invalid_response()
+    if not isinstance(value, bytes):
+        raise invalid_response()
+    return value
 
 
 def _raw_bytes(content_base64: str) -> bytes:
@@ -45,34 +37,33 @@ def _raw_bytes(content_base64: str) -> bytes:
     return data
 
 
-async def create_blob(client: AsyncClient, blob_input: BlobCreate) -> BlobMeta:
+async def create_blob(conn: Db, blob_input: BlobCreate) -> BlobMeta:
     raw = _raw_bytes(blob_input.content_base64)
-    rows, _ = await execute_query(
-        client.table(TABLE_NAME).insert(
-            {
-                "description": blob_input.description,
-                "mime_type": blob_input.mime_type,
-                "bytes": "\\x" + raw.hex(),
-            }
-        )
+    rows = await fetch(
+        conn,
+        "insert into blog.blobs (description, mime_type, bytes)"
+        f" values (%s, %s, %s) returning {_META_COLUMNS}",
+        (blob_input.description, blob_input.mime_type, raw),
     )
     if not rows:
         raise invalid_response()
     return _meta(rows[0])
 
 
-async def _load(client: AsyncClient, blob_id: str) -> dict[str, Any]:
-    rows, _ = await execute_query(
-        client.table(TABLE_NAME).select("*").eq("id", blob_id).limit(1)
+async def _load(conn: Db, blob_id: str) -> dict[str, Any]:
+    rows = await fetch(
+        conn,
+        f"select {_META_COLUMNS}, bytes from blog.blobs where id = %s limit 1",
+        (blob_id,),
     )
     return ensure_row(rows, code=_NOT_FOUND[0], message=_NOT_FOUND[1])
 
 
-async def get_blob_meta(client: AsyncClient, blob_id: str) -> BlobMeta:
-    return _meta(await _load(client, blob_id))
+async def get_blob_meta(conn: Db, blob_id: str) -> BlobMeta:
+    return _meta(await _load(conn, blob_id))
 
 
-async def get_blob_bytes(client: AsyncClient, blob_id: str) -> Response:
-    row = await _load(client, blob_id)
+async def get_blob_bytes(conn: Db, blob_id: str) -> Response:
+    row = await _load(conn, blob_id)
     meta = _meta(row)
     return Response(content=decode_bytea(row.get("bytes")), media_type=meta.mime_type)
